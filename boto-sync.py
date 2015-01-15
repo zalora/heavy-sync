@@ -7,6 +7,7 @@ from multiprocessing.pool import ThreadPool
 from os import path, rename
 from time import time
 
+import argparse
 import boto
 import socket
 import sqlite3
@@ -122,30 +123,33 @@ def initialize_db(connection):
 
 def main():
 
-    source = sys.argv[1]
-    destination = sys.argv[2]
+    parser = argparse.ArgumentParser()
+    parser.add_argument('source')
+    parser.add_argument('destination')
+    parser.add_argument('--db', default='state.db')
+    args = parser.parse_args()
 
-    db_name = 'state.db'
+    db = args.db
 
-    if path.exists(db_name):
-        connection = sqlite3.connect(db_name, isolation_level=None)
+    if path.exists(db):
+        connection = sqlite3.connect(db, isolation_level=None)
 
         if finished(connection):
             print 'Backing up previous completed run...'
             connection.close()
-            rename(db_name, '%s-%d' % (db_name, int(time())))
-            connection = sqlite3.connect(db_name, isolation_level=None)
+            rename(db, '%s-%d' % (db, int(time())))
+            connection = sqlite3.connect(db, isolation_level=None)
         else:
             print 'Resuming a previous run...'
 
     else:
         print 'Starting a new run...'
-        connection = sqlite3.connect(db_name, isolation_level=None)
+        connection = sqlite3.connect(db, isolation_level=None)
         initialize_db(connection)
-        get_contents(destination, connection, 'destination')
-        get_contents(source, connection, 'source')
+        get_contents(args.destination, connection, 'destination')
+        get_contents(args.source, connection, 'source')
 
-    process(source, destination, connection)
+    process(args.source, args.destination, connection)
 
 
 main()
