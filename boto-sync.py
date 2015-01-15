@@ -101,7 +101,7 @@ def get_contents(bucket_uri, connection, table):
                            (bucket_uri, key.name, key.etag))
 
 
-def initialize_state_data(connection):
+def initialize_db(connection):
 
     connection.executescript('''
         CREATE TABLE source (bucket VARCHAR,
@@ -121,21 +121,23 @@ def initialize_state_data(connection):
 
 def main():
 
-    if path.exists('sync.sqlite'):
-        connection = sqlite3.connect('sync.sqlite', isolation_level=None)
+    db_name = 'state.db'
+
+    if path.exists(db_name):
+        connection = sqlite3.connect(db_name, isolation_level=None)
         cursor = connection.cursor()
         cursor.execute('''SELECT 1 FROM source WHERE NOT processed LIMIT 1''')
 
         if cursor.fetchone() is not None:
-            print 'Unfinished state data found. Resuming...'
+            print 'Resuming a previous run...'
             process(connection)
             return
         else:
             connection.close()
-            rename('sync.sqlite', 'sync.sqlite-%s' % int(time()))
+            rename(db_name, '%s-%d' % (db_name, int(time())))
 
-    connection = sqlite3.connect('sync.sqlite', isolation_level=None)
-    initialize_state_data(connection)
+    connection = sqlite3.connect(db_name, isolation_level=None)
+    initialize_db(connection)
     process(connection)
 
 
