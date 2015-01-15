@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 
-from multiprocessing.pool import ThreadPool
-from os import path, rename
-from time import time
 from boto.exception import GSResponseError
 from boto.gs.key import Key as GSKey
 from boto.s3.key import Key as S3Key
+from multiprocessing.pool import ThreadPool
+from os import path, rename
+from time import time
 
 import boto
 import sqlite3
@@ -23,11 +23,11 @@ d_bucket_uri = sys.argv[2]
 def get_bucket(bucket_uri, validate=False):
     scheme = bucket_uri[:2]
     bucket_name = bucket_uri[5:]
-    boto_connection = {
+    connection = {
         'gs': boto.connect_gs,
         's3': boto.connect_s3,
     }[scheme]()
-    return boto_connection.get_bucket(bucket_name, validate=validate)
+    return connection.get_bucket(bucket_name, validate=validate)
 
 
 def get_key(bucket_uri, path):
@@ -39,18 +39,9 @@ def get_key(bucket_uri, path):
     return constructor(get_bucket(bucket_uri), path)
 
 
-# Populate the table with the contents of the bucket
-def fetch(bucket_uri, sqlite_connection, table):
-    bucket = get_bucket(bucket_uri, validate=True)
-    for key in bucket.list():
-        sqlite_connection.execute('INSERT INTO %s (bucket, path, hash) VALUES (?, ?, ?)' % table,
-                           (bucket_uri, key.name, key.etag))
-
-
-# Upload a path
-# Return True if the underlying command exits with code 0, False otherwise
+# Download an object from source bucket, then upload it to destination bucket
 # TODO: Handle errors
-def upload(path):
+def transfer(path):
     # Roll over when hitting 10 MB
     f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
     get_key(s_bucket_uri, path).get_contents_to_file(f)
@@ -58,10 +49,7 @@ def upload(path):
     return path
 
 
-def upload_row(row):
-    return upload(row[0])
-
-
+# Remove an object from destination bucket, ignoring "not found" errors
 def remove(path):
     bucket = get_bucket(d_bucket_uri)
     try:
@@ -71,8 +59,7 @@ def remove(path):
             raise
 
 
-# Continue a previous run
-def resume(connection):
+def process(connection):
 
     print 'Skipping over up-to-date objects...'
     connection.execute('''
@@ -86,7 +73,7 @@ def resume(connection):
     print 'Uploading new/updated objects from source to destination...'
     sql_it = connection.execute('''SELECT path FROM source WHERE NOT processed''')
     pool = ThreadPool()
-    pool_it = pool.imap_unordered(upload_row, list(sql_it))
+    pool_it = pool.imap_unordered(lambda row: transfer(row[0]), list(sql_it))
     for path in pool_it:
         connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
         print 'Finished: %s' % path
@@ -101,7 +88,15 @@ def resume(connection):
         connection.execute('''DELETE FROM destination WHERE rowid = ?''', (row[0],))
 
 
-def new_run(connection):
+# Populate the table with the contents of the bucket
+def get_contents(bucket_uri, connection, table):
+    bucket = get_bucket(bucket_uri, validate=True)
+    for key in bucket.list():
+        connection.execute('INSERT INTO %s (bucket, path, hash) VALUES (?, ?, ?)' % table,
+                           (bucket_uri, key.name, key.etag))
+
+
+def initialize_state_data(connection):
 
     connection.executescript('''
         CREATE TABLE source (bucket VARCHAR,
@@ -115,10 +110,8 @@ def new_run(connection):
         CREATE INDEX IF NOT EXISTS destination_hash_index ON destination (hash);
     ''')
 
-    fetch(s_bucket_uri, connection, 'source')
-    fetch(d_bucket_uri, connection, 'destination')
-
-    resume(connection)
+    get_contents(d_bucket_uri, connection, 'destination')
+    get_contents(s_bucket_uri, connection, 'source')
 
 
 def main():
@@ -130,14 +123,15 @@ def main():
 
         if cursor.fetchone() is not None:
             print 'Unfinished state data found. Resuming...'
-            resume(connection)
+            process(connection)
             return
         else:
             connection.close()
             rename('sync.sqlite', 'sync.sqlite-%s' % int(time()))
 
     connection = sqlite3.connect('sync.sqlite', isolation_level=None)
-    new_run(connection)
+    initialize_state_data(connection)
+    process(connection)
 
 
 main()
