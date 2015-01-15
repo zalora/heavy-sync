@@ -133,9 +133,11 @@ def main():
             process(connection)
             return
         else:
+            print 'Backing up previous completed run...'
             connection.close()
             rename(db_name, '%s-%d' % (db_name, int(time())))
 
+    print 'Starting a new run...'
     connection = sqlite3.connect(db_name, isolation_level=None)
     initialize_db(connection)
     process(connection)
