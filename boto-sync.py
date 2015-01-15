@@ -17,10 +17,6 @@ import tempfile
 import gcs_oauth2_boto_plugin
 
 
-s_bucket_uri = sys.argv[1]
-d_bucket_uri = sys.argv[2]
-
-
 def get_bucket(bucket_uri, validate=False):
     scheme = bucket_uri[:2]
     bucket_name = bucket_uri[5:]
@@ -42,21 +38,21 @@ def get_key(bucket_uri, path):
 
 # Download an object from source bucket, then upload it to destination bucket
 # TODO: Handle permanent errors
-def transfer(path):
+def transfer(source, destination, path):
     while True:
         try:
             # Roll over when hitting 10 MB
             f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
-            get_key(s_bucket_uri, path).get_contents_to_file(f)
-            get_key(d_bucket_uri, path).set_contents_from_file(f, rewind=True)
+            get_key(source, path).get_contents_to_file(f)
+            get_key(destination, path).set_contents_from_file(f, rewind=True)
             return path
         except socket.error as e:
             print e
 
 
 # Remove an object from destination bucket, ignoring "not found" errors
-def remove(path):
-    bucket = get_bucket(d_bucket_uri)
+def remove(destination, path):
+    bucket = get_bucket(destination)
     try:
         bucket.delete_key(path)
     except GSResponseError as e:
@@ -64,7 +60,13 @@ def remove(path):
             raise
 
 
-def process(connection):
+def finished(connection):
+    cursor = connection.cursor()
+    cursor.execute('''SELECT 1 FROM source WHERE NOT processed LIMIT 1''')
+    return cursor.fetchone() is None
+
+
+def process(source, destination, connection):
 
     print 'Skipping over up-to-date objects...'
     connection.execute('''
@@ -76,12 +78,14 @@ def process(connection):
     ''')
 
     print 'Uploading new/updated objects from source to destination...'
-    sql_it = connection.execute('''SELECT path FROM source WHERE NOT processed''')
-    pool = ThreadPool()
-    pool_it = pool.imap_unordered(lambda row: transfer(row[0]), list(sql_it))
-    for path in pool_it:
-        connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
-        print 'Finished: %s' % path
+    while not finished(connection):
+        sql_it = connection.execute('''SELECT path FROM source WHERE NOT processed LIMIT 1000''')
+        pool = ThreadPool()
+        pool_it = pool.imap_unordered(lambda row: transfer(source, destination, row[0]),
+                                      list(sql_it))
+        for path in pool_it:
+            connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
+            print 'Finished: %s' % path
 
     print 'Deleting objects in destination that have been deleted in source...'
     for row in connection.execute('''
@@ -89,7 +93,7 @@ def process(connection):
         FROM destination d LEFT JOIN source s
         ON d.path = s.path WHERE s.path IS NULL
     '''):
-        remove(row[1])
+        remove(destination, row[1])
         connection.execute('''DELETE FROM destination WHERE rowid = ?''', (row[0],))
 
 
@@ -115,32 +119,33 @@ def initialize_db(connection):
         CREATE INDEX IF NOT EXISTS destination_hash_index ON destination (hash);
     ''')
 
-    get_contents(d_bucket_uri, connection, 'destination')
-    get_contents(s_bucket_uri, connection, 'source')
-
 
 def main():
+
+    source = sys.argv[1]
+    destination = sys.argv[2]
 
     db_name = 'state.db'
 
     if path.exists(db_name):
         connection = sqlite3.connect(db_name, isolation_level=None)
-        cursor = connection.cursor()
-        cursor.execute('''SELECT 1 FROM source WHERE NOT processed LIMIT 1''')
 
-        if cursor.fetchone() is not None:
-            print 'Resuming a previous run...'
-            process(connection)
-            return
-        else:
+        if finished(connection):
             print 'Backing up previous completed run...'
             connection.close()
             rename(db_name, '%s-%d' % (db_name, int(time())))
+            connection = sqlite3.connect(db_name, isolation_level=None)
+        else:
+            print 'Resuming a previous run...'
 
-    print 'Starting a new run...'
-    connection = sqlite3.connect(db_name, isolation_level=None)
-    initialize_db(connection)
-    process(connection)
+    else:
+        print 'Starting a new run...'
+        connection = sqlite3.connect(db_name, isolation_level=None)
+        initialize_db(connection)
+        get_contents(destination, connection, 'destination')
+        get_contents(source, connection, 'source')
+
+    process(source, destination, connection)
 
 
 main()
