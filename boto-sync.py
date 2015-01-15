@@ -8,6 +8,7 @@ from os import path, rename
 from time import time
 
 import boto
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -40,13 +41,17 @@ def get_key(bucket_uri, path):
 
 
 # Download an object from source bucket, then upload it to destination bucket
-# TODO: Handle errors
+# TODO: Handle permanent errors
 def transfer(path):
-    # Roll over when hitting 10 MB
-    f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
-    get_key(s_bucket_uri, path).get_contents_to_file(f)
-    get_key(d_bucket_uri, path).set_contents_from_file(f, rewind=True)
-    return path
+    while True:
+        try:
+            # Roll over when hitting 10 MB
+            f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
+            get_key(s_bucket_uri, path).get_contents_to_file(f)
+            get_key(d_bucket_uri, path).set_contents_from_file(f, rewind=True)
+            return path
+        except socket.error as e:
+            print e
 
 
 # Remove an object from destination bucket, ignoring "not found" errors
