@@ -4,6 +4,8 @@ from multiprocessing.pool import ThreadPool
 from os import path, rename
 from time import time
 from boto.exception import GSResponseError
+from boto.gs.key import Key as GSKey
+from boto.s3.key import Key as S3Key
 
 import boto
 import sqlite3
@@ -18,19 +20,28 @@ s_bucket_uri = sys.argv[1]
 d_bucket_uri = sys.argv[2]
 
 
-def get_bucket(bucket_uri, validate=True):
+def get_bucket(bucket_uri, validate=False):
     scheme = bucket_uri[:2]
     bucket_name = bucket_uri[5:]
     boto_connection = {
         'gs': boto.connect_gs,
         's3': boto.connect_s3,
     }[scheme]()
-    bucket = boto_connection.get_bucket(bucket_name, validate=validate)
+    return boto_connection.get_bucket(bucket_name, validate=validate)
+
+
+def get_key(bucket_uri, path):
+    scheme = bucket_uri[:2]
+    constructor = {
+        'gs': GSKey,
+        's3': S3Key,
+    }[scheme]
+    return constructor(get_bucket(bucket_uri), path)
 
 
 # Populate the table with the contents of the bucket
 def fetch(bucket_uri, sqlite_connection, table):
-    bucket = get_bucket(bucket_uri)
+    bucket = get_bucket(bucket_uri, validate=True)
     for key in bucket.list():
         sqlite_connection.execute('INSERT INTO %s (bucket, path, hash) VALUES (?, ?, ?)' % table,
                            (bucket_uri, key.name, key.etag))
@@ -42,8 +53,8 @@ def fetch(bucket_uri, sqlite_connection, table):
 def upload(path):
     # Roll over when hitting 10 MB
     f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
-    get_bucket(s_bucket_uri, validate=False).get_key(path).get_contents_to_file(f)
-    Key(get_bucket(d_bucket_uri, validate=False), path).set_contents_from_file(f)
+    get_key(s_bucket_uri, path).get_contents_to_file(f)
+    get_key(d_bucket_uri, path).set_contents_from_file(f, rewind=True)
     return path
 
 
@@ -52,7 +63,7 @@ def upload_row(row):
 
 
 def remove(path):
-    bucket = get_bucket(d_bucket_uri, validate=False)
+    bucket = get_bucket(d_bucket_uri)
     try:
         bucket.delete_key(path)
     except GSResponseError as e:
@@ -78,6 +89,7 @@ def resume(connection):
     pool_it = pool.imap_unordered(upload_row, list(sql_it))
     for path in pool_it:
         connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
+        print 'Finished: %s' % path
 
     print 'Deleting objects in destination that have been deleted in source...'
     for row in connection.execute('''
