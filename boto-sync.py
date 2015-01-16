@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from boto.exception import GSResponseError
+from boto.exception import S3ResponseError
 from boto.gs.key import Key as GSKey
 from boto.s3.key import Key as S3Key
 from multiprocessing.pool import ThreadPool
@@ -38,7 +39,6 @@ def get_key(bucket_uri, path):
 
 
 # Download an object from source bucket, then upload it to destination bucket
-# TODO: Handle permanent errors
 def transfer(source, destination, path):
     while True:
         try:
@@ -49,6 +49,12 @@ def transfer(source, destination, path):
             return path
         except socket.error as e:
             print e
+        except (GSResponseError, S3ResponseError) as e:
+            if e.status == 404:
+                # TODO: Log this as a warning somewhere
+                return path
+            else:
+                raise
 
 
 # Remove an object from destination bucket, ignoring "not found" errors
@@ -56,7 +62,7 @@ def remove(destination, path):
     bucket = get_bucket(destination)
     try:
         bucket.delete_key(path)
-    except GSResponseError as e:
+    except (GSResponseError, S3ResponseError) as e:
         if e.status != 404:
             raise
 
