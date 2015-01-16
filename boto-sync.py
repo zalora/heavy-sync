@@ -92,7 +92,7 @@ def process(source, destination, connection):
                                       list(sql_it))
         for path in pool_it:
             connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
-            print 'Finished: %s' % path
+            print 'Finished: %s/%s -> %s/%s' % (source, path, destination, path)
 
     print 'Deleting objects in destination that have been deleted in source...'
     for row in connection.execute('''
