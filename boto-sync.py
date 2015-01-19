@@ -127,6 +127,20 @@ def initialize_db(connection):
     ''')
 
 
+def new_run(source, destination, db):
+    print 'Starting a new run...'
+    connection = sqlite3.connect(db, isolation_level=None)
+    initialize_db(connection)
+    get_contents(destination, connection, 'destination')
+    get_contents(source, connection, 'source')
+    process(source, destination, connection)
+
+
+def resume(source, destination, connection):
+    print 'Resuming a previous run...'
+    process(source, destination, connection)
+
+
 def main():
 
     parser = argparse.ArgumentParser()
@@ -138,24 +152,23 @@ def main():
     db = args.db
 
     if path.exists(db):
-        connection = sqlite3.connect(db, isolation_level=None)
 
-        if finished(connection):
-            print 'Backing up previous completed run...'
-            connection.close()
-            rename(db, '%s-%d' % (db, int(time())))
+        try:
             connection = sqlite3.connect(db, isolation_level=None)
-        else:
-            print 'Resuming a previous run...'
+            if finished(connection):
+                print 'Backing up previous completed run...'
+                connection.close()
+                rename(db, '%s-%d' % (db, int(time())))
+                new_run(args.source, args.destination, db)
+            else:
+                resume(args.source, args.destination, connection)
+
+        except sqlite3.OperationalError as e:
+            print 'Error encountered, please clean up %s manually.' % db
+            raise
 
     else:
-        print 'Starting a new run...'
-        connection = sqlite3.connect(db, isolation_level=None)
-        initialize_db(connection)
-        get_contents(args.destination, connection, 'destination')
-        get_contents(args.source, connection, 'source')
-
-    process(args.source, args.destination, connection)
+        new_run(args.source, args.destination, db)
 
 
 main()
