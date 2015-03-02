@@ -10,6 +10,6 @@ setup(name='heavy-sync',
       author_email='phu.hoang@zalora.com',
       url='https://github.com/zalora/heavy-sync',
       packages=['heavy-sync'],
-      install_requires=['boto'],
+      install_requires=['boto', 'gcs-oauth2-boto-plugin'],
       scripts=[join('heavy-sync', 'heavy-sync')],
 )
