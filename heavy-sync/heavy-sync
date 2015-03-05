@@ -4,6 +4,7 @@ from boto.exception import GSResponseError
 from boto.exception import S3ResponseError
 from boto.gs.key import Key as GSKey
 from boto.s3.key import Key as S3Key
+from datetime import datetime, timedelta
 from multiprocessing.pool import ThreadPool
 from os import path, rename
 from time import time
@@ -17,6 +18,20 @@ import tempfile
 
 # Seemingly unused but needed for GCS authentication
 import gcs_oauth2_boto_plugin
+
+
+def delete_old_versions(bucket_uri):
+    bucket = get_bucket(bucket_uri)
+    limit = datetime.now() - timedelta(days=30)
+    for k in bucket.list_versions():
+        if not k.DeletedTime:
+            continue
+        # This ignores timezones, but that doesn't matter now
+        deleted_time = datetime.strptime(k.DeletedTime[0:-5],
+                                         '%Y-%m-%dT%H:%M:%S')
+        if deleted_time < limit:
+            print 'Purging %s, deleted at %s' % (k.name, deleted_time)
+            k.delete()
 
 
 def get_bucket(bucket_uri, validate=False):
@@ -48,10 +63,14 @@ def transfer(source, destination, path):
             get_key(destination, path).set_contents_from_file(f, rewind=True)
             return path
         except socket.error as e:
-            print e
+            sys.stderr.write(str(e))
+            sys.stderr.write('Retrying path: %s%s' %
+                             (source, path))
         except (GSResponseError, S3ResponseError) as e:
             if e.status == 404:
-                # TODO: Log this as a warning somewhere
+                sys.stderr.write(str(e))
+                sys.stderr.write('Ignoring path: %s%s' %
+                                 (source, path))
                 return path
             else:
                 raise
@@ -65,6 +84,9 @@ def remove(destination, path):
     except (GSResponseError, S3ResponseError) as e:
         if e.status != 404:
             raise
+        sys.stderr.write(str(e))
+        sys.stderr.write('Ignoring path: %s%s' %
+                         (destination, path))
 
 
 def finished(connection):
@@ -164,11 +186,16 @@ def main():
                 resume(args.source, args.destination, connection)
 
         except sqlite3.OperationalError as e:
-            print 'Error encountered, please clean up %s manually.' % db
+            sys.stderr.write(str(e))
+            sys.stderr.write('Error encountered, please clean up %s manually.'
+                             % db)
             raise
 
     else:
         new_run(args.source, args.destination, db)
+
+    print 'Purging old deleted objects...'
+    delete_old_versions(args.destination)
 
 
 main()
