@@ -11,5 +11,8 @@ setup(name='heavy-sync',
       url='https://github.com/zalora/heavy-sync',
       packages=['heavy-sync'],
       install_requires=['boto', 'gcs-oauth2-boto-plugin'],
-      scripts=[join('heavy-sync', 'heavy-sync')],
+      scripts=[
+          join('heavy-sync', 'heavy-check'),
+          join('heavy-sync', 'heavy-sync'),
+      ],
 )

@@ -1,0 +1,90 @@
+#!/usr/bin/env python
+# This module deliberately does not reuse code from heavy-sync.
+
+import argparse
+import boto
+import hashlib
+import random
+import tempfile
+
+# Seemingly unused but needed for GCS authentication
+import gcs_oauth2_boto_plugin
+
+
+LOWER_POOL_LIMIT = 10
+UPPER_POOL_LIMIT = 100
+
+
+def random_add(item, pool, probability):
+    if random.random() < probability:
+        pool.append(item)
+
+
+def maybe_add(item, pool, probability):
+
+    length = len(pool)
+
+    if length < 1:
+        pool.append(item)
+    elif length < UPPER_POOL_LIMIT:
+        random_add(item, pool, probability)
+    else:
+        pool = random.sample(pool, LOWER_POOL_LIMIT)
+        probability = probability * LOWER_POOL_LIMIT / UPPER_POOL_LIMIT
+        random_add(item, pool, probability)
+
+    return pool, probability
+
+
+def get_bucket(uri):
+    scheme = uri[:2]
+    bucket_name = uri[5:]
+    connection = {
+        'gs': boto.connect_gs,
+        's3': boto.connect_s3,
+    }[scheme]()
+    return connection.get_bucket(bucket_name)
+
+
+def choose_target(source):
+
+    count = 0
+    pool = []
+    probability = 1.0 / UPPER_POOL_LIMIT
+    source_bucket = get_bucket(source)
+
+    for key in source_bucket.list():
+        pool, probability = maybe_add((key.name, key.etag), pool, probability)
+        print count, len(pool), probability
+        count += 1
+        #if count > 100: break
+
+    return random.choice(pool)
+
+
+def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('source')
+    parser.add_argument('destination')
+    args = parser.parse_args()
+
+    name, source_etag = choose_target(args.source)
+
+    destination_bucket = get_bucket(args.destination)
+    key = destination_bucket.get_key(name)
+    assert key.etag == source_etag
+
+    # Roll over when hitting 10 MB
+    f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
+    key.get_contents_to_file(f)
+    # Go back to the beginning of the file before reading
+    f.seek(0)
+    real_md5 = hashlib.md5(f.read()).hexdigest()
+    # For some reason source_etag contains double quotes around the hash
+    assert real_md5 in source_etag
+
+    print 'Checked file %s/%s against %s. MD5 %s. OK.' % (args.source, name, args.destination, real_md5)
+
+
+main()
