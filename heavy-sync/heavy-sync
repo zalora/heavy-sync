@@ -20,7 +20,11 @@ import tempfile
 import gcs_oauth2_boto_plugin
 
 
-def delete_old_versions(bucket_uri):
+def delete_old_versions(bucket_uri, old_threshold):
+
+    if old_threshold == 0:
+        return
+
     bucket = get_bucket(bucket_uri)
     limit = datetime.now() - timedelta(days=30)
     for k in bucket.list_versions():
@@ -169,6 +173,7 @@ def main():
     parser.add_argument('source')
     parser.add_argument('destination')
     parser.add_argument('--db', default='state.db')
+    parser.add_argument('--old-threshold', default=0)
     args = parser.parse_args()
 
     db = args.db
@@ -195,7 +200,7 @@ def main():
         new_run(args.source, args.destination, db)
 
     print 'Purging old deleted objects...'
-    delete_old_versions(args.destination)
+    delete_old_versions(args.destination, args.old_threshold)
 
 
 main()
