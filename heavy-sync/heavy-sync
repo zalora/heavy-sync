@@ -24,9 +24,12 @@ def delete_old_versions(bucket_uri, old_threshold):
 
     if old_threshold == 0:
         return
+    assert old_threshold > 0
+
+    print 'Purging old deleted objects...'
 
     bucket = get_bucket(bucket_uri)
-    limit = datetime.now() - timedelta(days=30)
+    limit = datetime.now() - timedelta(days=old_threshold)
     for k in bucket.list_versions():
         if not k.DeletedTime:
             continue
@@ -199,7 +202,6 @@ def main():
     else:
         new_run(args.source, args.destination, db)
 
-    print 'Purging old deleted objects...'
     delete_old_versions(args.destination, args.old_threshold)
 
 
