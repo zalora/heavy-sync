@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 
-from boto.exception import GSResponseError
-from boto.exception import S3ResponseError
-from boto.gs.key import Key as GSKey
-from boto.s3.key import Key as S3Key
+from boto.exception import GSResponseError, S3ResponseError
 from datetime import datetime, timedelta
 from multiprocessing.pool import ThreadPool
 from os import path, rename
@@ -20,7 +17,15 @@ import tempfile
 import gcs_oauth2_boto_plugin
 
 
-def delete_old_versions(bucket_uri, old_threshold):
+def get_bucket(scheme, bucket_name):
+    connection = {
+        'gs': boto.connect_gs,
+        's3': boto.connect_s3,
+    }[scheme]()
+    return connection.get_bucket(bucket_name)
+
+
+def delete_old_versions(bucket, folder, old_threshold):
 
     if old_threshold == 0:
         return
@@ -28,9 +33,9 @@ def delete_old_versions(bucket_uri, old_threshold):
 
     print 'Purging old deleted objects...'
 
-    bucket = get_bucket(bucket_uri)
     limit = datetime.now() - timedelta(days=old_threshold)
-    for k in bucket.list_versions():
+
+    for k in bucket.list_versions(prefix=folder):
         if not k.DeletedTime:
             continue
         # This ignores timezones, but that doesn't matter now
@@ -41,33 +46,14 @@ def delete_old_versions(bucket_uri, old_threshold):
             k.delete()
 
 
-def get_bucket(bucket_uri, validate=False):
-    scheme = bucket_uri[:2]
-    bucket_name = bucket_uri[5:]
-    connection = {
-        'gs': boto.connect_gs,
-        's3': boto.connect_s3,
-    }[scheme]()
-    return connection.get_bucket(bucket_name, validate=validate)
-
-
-def get_key(bucket_uri, path):
-    scheme = bucket_uri[:2]
-    constructor = {
-        'gs': GSKey,
-        's3': S3Key,
-    }[scheme]
-    return constructor(get_bucket(bucket_uri), path)
-
-
 # Download an object from source bucket, then upload it to destination bucket
-def transfer(source, destination, path):
+def transfer(source_bucket, destination_bucket, path):
     while True:
         try:
             # Roll over when hitting 10 MB
             f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
-            get_key(source, path).get_contents_to_file(f)
-            get_key(destination, path).set_contents_from_file(f, rewind=True)
+            source_bucket.get_key(path).get_contents_to_file(f)
+            destination_bucket.new_key(path).set_contents_from_file(f, rewind=True)
             return path
         except socket.error as e:
             sys.stderr.write(str(e))
@@ -83,9 +69,8 @@ def transfer(source, destination, path):
                 raise
 
 
-# Remove an object from destination bucket, ignoring "not found" errors
-def remove(destination, path):
-    bucket = get_bucket(destination)
+# Remove an object from a bucket, ignoring "not found" errors
+def remove(bucket, path):
     try:
         bucket.delete_key(path)
     except (GSResponseError, S3ResponseError) as e:
@@ -102,7 +87,7 @@ def finished(connection):
     return cursor.fetchone() is None
 
 
-def process(source, destination, connection):
+def process(source_bucket, destination_bucket, connection):
 
     print 'Skipping over up-to-date objects...'
     connection.execute('''
@@ -113,15 +98,17 @@ def process(source, destination, connection):
         )
     ''')
 
+    def transfer_row(row):
+        return transfer(source_bucket, destination_bucket, row[0])
+
     print 'Uploading new/updated objects from source to destination...'
     while not finished(connection):
         sql_it = connection.execute('''SELECT path FROM source WHERE NOT processed LIMIT 1000''')
         pool = ThreadPool()
-        pool_it = pool.imap_unordered(lambda row: transfer(source, destination, row[0]),
-                                      list(sql_it))
+        pool_it = pool.imap_unordered(transfer_row, list(sql_it))
         for path in pool_it:
             connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
-            print 'Finished: %s/%s -> %s/%s' % (source, path, destination, path)
+            print 'Finished: %s/%s -> %s/%s' % (source_bucket, path, destination_bucket, path)
 
     print 'Deleting objects in destination that have been deleted in source...'
     for row in connection.execute('''
@@ -129,20 +116,18 @@ def process(source, destination, connection):
         FROM destination d LEFT JOIN source s
         ON d.path = s.path WHERE s.path IS NULL
     '''):
-        remove(destination, row[1])
+        remove(destination_bucket, row[1])
         connection.execute('''DELETE FROM destination WHERE rowid = ?''', (row[0],))
 
 
 # Populate the table with the contents of the bucket
-def get_contents(bucket_uri, connection, table):
-    bucket = get_bucket(bucket_uri, validate=True)
-    for key in bucket.list():
+def get_contents(bucket, folder, connection, table):
+    for key in bucket.list(prefix=folder):
         connection.execute('INSERT INTO %s (bucket, path, hash) VALUES (?, ?, ?)' % table,
-                           (bucket_uri, key.name, key.etag))
+                           (bucket.name, key.name, key.etag))
 
 
 def initialize_db(connection):
-
     connection.executescript('''
         CREATE TABLE source (bucket VARCHAR,
                              path VARCHAR,
@@ -156,18 +141,25 @@ def initialize_db(connection):
     ''')
 
 
-def new_run(source, destination, db):
+def new_run(source_bucket, destination_bucket, folder, db):
     print 'Starting a new run...'
+
     connection = sqlite3.connect(db, isolation_level=None)
     initialize_db(connection)
-    get_contents(destination, connection, 'destination')
-    get_contents(source, connection, 'source')
-    process(source, destination, connection)
+
+    get_contents(destination_bucket, folder, connection, 'destination')
+    get_contents(source_bucket, folder, connection, 'source')
+
+    process(source_bucket, destination_bucket, connection)
 
 
-def resume(source, destination, connection):
-    print 'Resuming a previous run...'
-    process(source, destination, connection)
+def break_uri(uri):
+    # scheme://bucket-name/sub/folder -> (scheme, bucket-name, /sub/folder)
+    parts = uri.split('/')
+    scheme = parts[0].split(':')[0]
+    bucket_name = parts[2]
+    folder = '/'.join(parts[3:])
+    return (scheme, bucket_name, folder)
 
 
 def main():
@@ -179,6 +171,12 @@ def main():
     parser.add_argument('--old-threshold', default=0)
     args = parser.parse_args()
 
+    s_scheme, s_bucket_name, folder = break_uri(args.source)
+    d_scheme, d_bucket_name, _      = break_uri(args.destination)
+
+    s_bucket = get_bucket(s_scheme, s_bucket_name)
+    d_bucket = get_bucket(d_scheme, d_bucket_name)
+
     db = args.db
 
     if path.exists(db):
@@ -189,9 +187,10 @@ def main():
                 print 'Backing up previous completed run...'
                 connection.close()
                 rename(db, '%s-%d' % (db, int(time())))
-                new_run(args.source, args.destination, db)
+                new_run(s_bucket, d_bucket, folder, db)
             else:
-                resume(args.source, args.destination, connection)
+                print 'Resuming a previous run...'
+                process(s_bucket, d_bucket, connection)
 
         except sqlite3.OperationalError as e:
             sys.stderr.write(str(e))
@@ -200,9 +199,9 @@ def main():
             raise
 
     else:
-        new_run(args.source, args.destination, db)
+        new_run(s_bucket, d_bucket, folder, db)
 
-    delete_old_versions(args.destination, args.old_threshold)
+    delete_old_versions(d_bucket, folder, args.old_threshold)
 
 
 main()

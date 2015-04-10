@@ -20,13 +20,11 @@ def random_add(item, pool, probability):
         pool.append(item)
 
 
-def maybe_add(item, pool, probability):
+def handle_pool(item, pool, probability):
 
     length = len(pool)
 
-    if length < 1:
-        pool.append(item)
-    elif length < UPPER_POOL_LIMIT:
+    if length < UPPER_POOL_LIMIT:
         random_add(item, pool, probability)
     else:
         pool = random.sample(pool, LOWER_POOL_LIMIT)
@@ -36,9 +34,7 @@ def maybe_add(item, pool, probability):
     return pool, probability
 
 
-def get_bucket(uri):
-    scheme = uri[:2]
-    bucket_name = uri[5:]
+def get_bucket(scheme, bucket_name):
     connection = {
         'gs': boto.connect_gs,
         's3': boto.connect_s3,
@@ -46,20 +42,28 @@ def get_bucket(uri):
     return connection.get_bucket(bucket_name)
 
 
-def choose_target(source):
+def choose_target(bucket, folder):
 
-    count = 0
     pool = []
-    probability = 1.0 / UPPER_POOL_LIMIT
-    source_bucket = get_bucket(source)
+    probability = 1.0
 
-    for key in source_bucket.list():
-        pool, probability = maybe_add((key.name, key.etag), pool, probability)
-        print count, len(pool), probability
-        count += 1
-        #if count > 100: break
+    for key in bucket.list(prefix=folder):
+        # Skip folders
+        if key.name[-1] == '/':
+            continue
+        pool, probability = handle_pool((key.name, key.etag), pool, probability)
 
+    assert pool, '%s/%s is empty!' % (bucket, folder)
     return random.choice(pool)
+
+
+def break_uri(uri):
+    # scheme://bucket-name/sub/folder -> (scheme, bucket-name, /sub/folder)
+    parts = uri.split('/')
+    scheme = parts[0].split(':')[0]
+    bucket_name = parts[2]
+    folder = '/'.join(parts[3:])
+    return (scheme, bucket_name, folder)
 
 
 def main():
@@ -69,11 +73,16 @@ def main():
     parser.add_argument('destination')
     args = parser.parse_args()
 
-    name, source_etag = choose_target(args.source)
+    s_scheme, s_bucket_name, folder = break_uri(args.source)
+    d_scheme, d_bucket_name, _      = break_uri(args.destination)
 
-    destination_bucket = get_bucket(args.destination)
-    key = destination_bucket.get_key(name)
-    assert key.etag == source_etag
+    s_bucket = get_bucket(s_scheme, s_bucket_name)
+    d_bucket = get_bucket(d_scheme, d_bucket_name)
+
+    name, s_etag = choose_target(s_bucket, folder)
+
+    key = d_bucket.get_key(name)
+    assert key, '%s://%s/%s must exist!' % (d_scheme, d_bucket_name, name)
 
     # Roll over when hitting 10 MB
     f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
@@ -81,10 +90,12 @@ def main():
     # Go back to the beginning of the file before reading
     f.seek(0)
     real_md5 = hashlib.md5(f.read()).hexdigest()
-    # For some reason source_etag contains double quotes around the hash
-    assert real_md5 in source_etag
+    # For some reason s_etag contains double quotes around the hash
+    assert real_md5 in s_etag, 'Hash of %s://%s/%s must be %s!' % (
+        d_scheme, d_bucket_name, name, s_etag)
 
-    print 'Checked file %s/%s against %s. MD5 %s. OK.' % (args.source, name, args.destination, real_md5)
+    print 'Checked file %s://%s/%s against %s://%s. MD5 %s. OK.' % (
+        s_scheme, s_bucket_name, name, d_scheme, d_bucket_name, real_md5)
 
 
 main()
