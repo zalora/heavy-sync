@@ -17,33 +17,15 @@ import tempfile
 import gcs_oauth2_boto_plugin
 
 
-def get_bucket(scheme, bucket_name):
-    connection = {
+def get_connection(scheme):
+    return {
         'gs': boto.connect_gs,
         's3': boto.connect_s3,
     }[scheme]()
-    return connection.get_bucket(bucket_name)
 
 
-def delete_old_versions(bucket, folder, old_threshold):
-
-    if old_threshold == 0:
-        return
-    assert old_threshold > 0
-
-    print 'Purging old deleted objects...'
-
-    limit = datetime.now() - timedelta(days=old_threshold)
-
-    for k in bucket.list_versions(prefix=folder):
-        if not k.DeletedTime:
-            continue
-        # This ignores timezones, but that doesn't matter now
-        deleted_time = datetime.strptime(k.DeletedTime[0:-5],
-                                         '%Y-%m-%dT%H:%M:%S')
-        if deleted_time < limit:
-            print 'Purging %s, deleted at %s' % (k.name, deleted_time)
-            k.delete()
+def lookup(scheme, bucket_name):
+    return get_connection(scheme).lookup(bucket_name)
 
 
 # Download an object from source bucket, then upload it to destination bucket
@@ -57,13 +39,13 @@ def transfer(source_bucket, destination_bucket, path):
             return path
         except socket.error as e:
             sys.stderr.write(str(e))
-            sys.stderr.write('Retrying path: %s%s' %
-                             (source, path))
+            sys.stderr.write('Retrying path: %s/%s' %
+                             (source_bucket, path))
         except (GSResponseError, S3ResponseError) as e:
             if e.status == 404:
                 sys.stderr.write(str(e))
-                sys.stderr.write('Ignoring path: %s%s' %
-                                 (source, path))
+                sys.stderr.write('Ignoring path: %s/%s' %
+                                 (source_bucket, path))
                 return path
             else:
                 raise
@@ -162,22 +144,22 @@ def break_uri(uri):
     return (scheme, bucket_name, folder)
 
 
-def main():
+DEFAULT_DB = 'state.db'
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('source')
-    parser.add_argument('destination')
-    parser.add_argument('--db', default='state.db')
-    parser.add_argument('--old-threshold', default=0)
-    args = parser.parse_args()
+def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}):
 
-    s_scheme, s_bucket_name, folder = break_uri(args.source)
-    d_scheme, d_bucket_name, _      = break_uri(args.destination)
+    s_scheme, s_bucket_name, folder = break_uri(source)
+    d_scheme, d_bucket_name, _      = break_uri(destination)
 
-    s_bucket = get_bucket(s_scheme, s_bucket_name)
-    d_bucket = get_bucket(d_scheme, d_bucket_name)
+    s_bucket = lookup(s_scheme, s_bucket_name)
+    d_bucket = lookup(d_scheme, d_bucket_name)
 
-    db = args.db
+    if d_bucket is None:
+        d_bucket = get_connection(d_scheme).create_bucket(d_bucket_name,
+                                                          **create_bucket_args)
+    # TODO: make this an option?
+    if not d_bucket.get_versioning_status():
+        d_bucket.configure_versioning(True)
 
     if path.exists(db):
 
@@ -194,14 +176,38 @@ def main():
 
         except sqlite3.OperationalError as e:
             sys.stderr.write(str(e))
-            sys.stderr.write('Error encountered, please clean up %s manually.'
-                             % db)
+            sys.stderr.write('Error encountered, please clean up %s manually.' % db)
             raise
 
     else:
         new_run(s_bucket, d_bucket, folder, db)
 
-    delete_old_versions(d_bucket, folder, args.old_threshold)
+
+def maybe_copy_key(s_dict, d_dict, key):
+    value = s_dict.get(key, None)
+    if value is not None:
+        d_dict[key] = value
 
 
-main()
+def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('source')
+    parser.add_argument('destination')
+    parser.add_argument('--db', default=DEFAULT_DB)
+    parser.add_argument('--location', default=None)
+
+    # GS only
+    parser.add_argument('--storage-class', default=None)
+
+    args = vars(parser.parse_args())
+
+    create_bucket_args = {}
+    maybe_copy_key(args, create_bucket_args, 'location')
+    maybe_copy_key(args, create_bucket_args, 'storage_class')
+
+    heavy_sync(args['source'], args['destination'], args['db'], create_bucket_args)
+
+
+if __name__ == '__main__':
+    main()
