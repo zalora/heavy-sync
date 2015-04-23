@@ -69,7 +69,7 @@ def finished(connection):
     return cursor.fetchone() is None
 
 
-def process(source_bucket, destination_bucket, connection):
+def process(source_bucket, destination_bucket, connection, thread_pool_args):
 
     print 'Skipping over up-to-date objects...'
     connection.execute('''
@@ -86,7 +86,7 @@ def process(source_bucket, destination_bucket, connection):
     print 'Uploading new/updated objects from source to destination...'
     while not finished(connection):
         sql_it = connection.execute('''SELECT path FROM source WHERE NOT processed LIMIT 1000''')
-        pool = ThreadPool()
+        pool = ThreadPool(**thread_pool_args)
         pool_it = pool.imap_unordered(transfer_row, list(sql_it))
         for path in pool_it:
             connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
@@ -123,7 +123,7 @@ def initialize_db(connection):
     ''')
 
 
-def new_run(source_bucket, destination_bucket, folder, db):
+def new_run(source_bucket, destination_bucket, folder, db, thread_pool_args):
     print 'Starting a new run...'
 
     connection = sqlite3.connect(db, isolation_level=None)
@@ -132,7 +132,7 @@ def new_run(source_bucket, destination_bucket, folder, db):
     get_contents(destination_bucket, folder, connection, 'destination')
     get_contents(source_bucket, folder, connection, 'source')
 
-    process(source_bucket, destination_bucket, connection)
+    process(source_bucket, destination_bucket, connection, thread_pool_args)
 
 
 def break_uri(uri):
@@ -146,7 +146,7 @@ def break_uri(uri):
 
 DEFAULT_DB = 'state.db'
 
-def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}):
+def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, thread_pool_args={}):
 
     s_scheme, s_bucket_name, folder = break_uri(source)
     d_scheme, d_bucket_name, _      = break_uri(destination)
@@ -169,10 +169,10 @@ def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}):
                 print 'Backing up previous completed run...'
                 connection.close()
                 rename(db, '%s-%d' % (db, int(time())))
-                new_run(s_bucket, d_bucket, folder, db)
+                new_run(s_bucket, d_bucket, folder, db, thread_pool_args)
             else:
                 print 'Resuming a previous run...'
-                process(s_bucket, d_bucket, connection)
+                process(s_bucket, d_bucket, connection, thread_pool_args)
 
         except sqlite3.OperationalError as e:
             sys.stderr.write(str(e))
@@ -195,10 +195,12 @@ def main():
     parser.add_argument('source')
     parser.add_argument('destination')
     parser.add_argument('--db', default=DEFAULT_DB)
-    parser.add_argument('--location', default=None)
 
+    parser.add_argument('--location', default=None)
     # GS only
     parser.add_argument('--storage-class', default=None)
+
+    parser.add_argument('--processes', type=int, default=None)
 
     args = vars(parser.parse_args())
 
@@ -206,7 +208,10 @@ def main():
     maybe_copy_key(args, create_bucket_args, 'location')
     maybe_copy_key(args, create_bucket_args, 'storage_class')
 
-    heavy_sync(args['source'], args['destination'], args['db'], create_bucket_args)
+    thread_pool_args = {}
+    maybe_copy_key(args, thread_pool_args, 'processes')
+
+    heavy_sync(args['source'], args['destination'], args['db'], create_bucket_args, thread_pool_args)
 
 
 if __name__ == '__main__':
