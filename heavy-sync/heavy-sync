@@ -83,14 +83,13 @@ def process(source_bucket, destination_bucket, connection, process_pool_args):
     ''')
 
     print 'Uploading new/updated objects from source to destination...'
+    process_pool = Pool(**process_pool_args)
     while not finished(connection):
         # Use a list instead of a generator because "SQLite objects created in
-        # a thread can only be used in that same thread"
+        # a thread can only be used in that same thread". The query only
+        # fetches a chunk of paths at a time so it's not too bad.
         paths = [row[0] for row in
                  connection.execute('''SELECT path FROM source WHERE NOT processed LIMIT 1000''')]
-        # For some reason, without maxtasksperchild, the number of
-        # threads/processes increases uncontrollably over time
-        process_pool = Pool(maxtasksperchild=100, **process_pool_args)
         resulting_paths = process_pool.imap_unordered(partial(transfer, source_bucket, destination_bucket), paths)
         for path in resulting_paths:
             connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
