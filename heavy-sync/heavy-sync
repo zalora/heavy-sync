@@ -88,7 +88,9 @@ def process(source_bucket, destination_bucket, connection, process_pool_args):
         # a thread can only be used in that same thread"
         paths = [row[0] for row in
                  connection.execute('''SELECT path FROM source WHERE NOT processed LIMIT 1000''')]
-        process_pool = Pool(**process_pool_args)
+        # For some reason, without maxtasksperchild, the number of
+        # threads/processes increases uncontrollably over time
+        process_pool = Pool(maxtasksperchild=100, **process_pool_args)
         resulting_paths = process_pool.imap_unordered(partial(transfer, source_bucket, destination_bucket), paths)
         for path in resulting_paths:
             connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
