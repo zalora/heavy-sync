@@ -2,7 +2,9 @@
 
 from boto.exception import GSResponseError, S3ResponseError
 from datetime import datetime, timedelta
-from multiprocessing.pool import ThreadPool
+from functools import partial
+#from multiprocessing import Pool
+from multiprocessing.pool import ThreadPool as Pool
 from os import path, rename
 from time import time
 
@@ -69,7 +71,7 @@ def finished(connection):
     return cursor.fetchone() is None
 
 
-def process(source_bucket, destination_bucket, connection, thread_pool_args):
+def process(source_bucket, destination_bucket, connection, process_pool_args):
 
     print 'Skipping over up-to-date objects...'
     connection.execute('''
@@ -80,15 +82,15 @@ def process(source_bucket, destination_bucket, connection, thread_pool_args):
         )
     ''')
 
-    def transfer_row(row):
-        return transfer(source_bucket, destination_bucket, row[0])
-
     print 'Uploading new/updated objects from source to destination...'
     while not finished(connection):
-        sql_it = connection.execute('''SELECT path FROM source WHERE NOT processed LIMIT 1000''')
-        pool = ThreadPool(**thread_pool_args)
-        pool_it = pool.imap_unordered(transfer_row, list(sql_it))
-        for path in pool_it:
+        # Use a list instead of a generator because "SQLite objects created in
+        # a thread can only be used in that same thread"
+        paths = [row[0] for row in
+                 connection.execute('''SELECT path FROM source WHERE NOT processed LIMIT 1000''')]
+        process_pool = Pool(**process_pool_args)
+        resulting_paths = process_pool.imap_unordered(partial(transfer, source_bucket, destination_bucket), paths)
+        for path in resulting_paths:
             connection.execute('''UPDATE source SET processed = 1 WHERE path = ?''', (path,))
             print 'Finished: %s/%s -> %s/%s' % (source_bucket, path, destination_bucket, path)
 
@@ -123,7 +125,7 @@ def initialize_db(connection):
     ''')
 
 
-def new_run(source_bucket, destination_bucket, folder, db, thread_pool_args):
+def new_run(source_bucket, destination_bucket, folder, db, process_pool_args):
     print 'Starting a new run...'
 
     connection = sqlite3.connect(db, isolation_level=None)
@@ -132,7 +134,7 @@ def new_run(source_bucket, destination_bucket, folder, db, thread_pool_args):
     get_contents(destination_bucket, folder, connection, 'destination')
     get_contents(source_bucket, folder, connection, 'source')
 
-    process(source_bucket, destination_bucket, connection, thread_pool_args)
+    process(source_bucket, destination_bucket, connection, process_pool_args)
 
 
 def break_uri(uri):
@@ -146,7 +148,7 @@ def break_uri(uri):
 
 DEFAULT_DB = 'state.db'
 
-def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, thread_pool_args={}):
+def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, process_pool_args={}):
 
     s_scheme, s_bucket_name, folder = break_uri(source)
     d_scheme, d_bucket_name, _      = break_uri(destination)
@@ -169,10 +171,10 @@ def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, thread
                 print 'Backing up previous completed run...'
                 connection.close()
                 rename(db, '%s-%d' % (db, int(time())))
-                new_run(s_bucket, d_bucket, folder, db, thread_pool_args)
+                new_run(s_bucket, d_bucket, folder, db, process_pool_args)
             else:
                 print 'Resuming a previous run...'
-                process(s_bucket, d_bucket, connection, thread_pool_args)
+                process(s_bucket, d_bucket, connection, process_pool_args)
 
         except sqlite3.OperationalError as e:
             sys.stderr.write(str(e))
@@ -180,7 +182,7 @@ def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, thread
             raise
 
     else:
-        new_run(s_bucket, d_bucket, folder, db)
+        new_run(s_bucket, d_bucket, folder, db, process_pool_args)
 
 
 def maybe_copy_key(s_dict, d_dict, key):
@@ -208,10 +210,10 @@ def main():
     maybe_copy_key(args, create_bucket_args, 'location')
     maybe_copy_key(args, create_bucket_args, 'storage_class')
 
-    thread_pool_args = {}
-    maybe_copy_key(args, thread_pool_args, 'processes')
+    process_pool_args = {}
+    maybe_copy_key(args, process_pool_args, 'processes')
 
-    heavy_sync(args['source'], args['destination'], args['db'], create_bucket_args, thread_pool_args)
+    heavy_sync(args['source'], args['destination'], args['db'], create_bucket_args, process_pool_args)
 
 
 if __name__ == '__main__':
