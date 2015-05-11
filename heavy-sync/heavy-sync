@@ -19,6 +19,20 @@ import tempfile
 import gcs_oauth2_boto_plugin
 
 
+# Work around https://github.com/boto/boto/issues/2836
+import ssl
+
+_old_match_hostname = ssl.match_hostname
+
+def _new_match_hostname(cert, hostname):
+   if hostname.endswith('.s3.amazonaws.com'):
+      pos = hostname.find('.s3.amazonaws.com')
+      hostname = hostname[:pos].replace('.', '') + hostname[pos:]
+   return _old_match_hostname(cert, hostname)
+
+ssl.match_hostname = _new_match_hostname
+
+
 def get_connection(scheme):
     return {
         'gs': boto.connect_gs,
@@ -27,7 +41,15 @@ def get_connection(scheme):
 
 
 def lookup(scheme, bucket_name):
-    return get_connection(scheme).lookup(bucket_name)
+    # Can't use `lookup` due to https://github.com/boto/boto/issues/2262 and
+    # https://github.com/boto/boto/issues/2836
+    try:
+        return get_connection(scheme).get_bucket(bucket_name)
+    except (GSResponseError, S3ResponseError) as e:
+        if e.status == 404:
+            return None
+        else:
+            raise
 
 
 # Download an object from source bucket, then upload it to destination bucket
@@ -163,6 +185,9 @@ def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, proces
     # TODO: make this an option?
     if not d_bucket.get_versioning_status():
         d_bucket.configure_versioning(True)
+
+    assert s_bucket is not None
+    assert d_bucket is not None
 
     if path.exists(db):
 
