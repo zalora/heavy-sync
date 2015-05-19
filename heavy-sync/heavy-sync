@@ -58,21 +58,18 @@ def transfer(source_bucket, destination_bucket, path):
         try:
             # Roll over when hitting 10 MB
             f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
-            source_bucket.get_key(path).get_contents_to_file(f)
+            source_key = source_bucket.get_key(path)
+            if source_key is None:
+                sys.stderr.write('Ignoring nonexistent path: %s/%s' %
+                                 (source_bucket, path))
+                return path
+            source_key.get_contents_to_file(f)
             destination_bucket.new_key(path).set_contents_from_file(f, rewind=True)
             return path
         except socket.error as e:
             sys.stderr.write(str(e))
             sys.stderr.write('Retrying path: %s/%s' %
                              (source_bucket, path))
-        except (GSResponseError, S3ResponseError) as e:
-            if e.status == 404:
-                sys.stderr.write(str(e))
-                sys.stderr.write('Ignoring path: %s/%s' %
-                                 (source_bucket, path))
-                return path
-            else:
-                raise
 
 
 # Remove an object from a bucket, ignoring "not found" errors
