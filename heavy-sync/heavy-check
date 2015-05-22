@@ -11,6 +11,20 @@ import tempfile
 import gcs_oauth2_boto_plugin
 
 
+# Work around https://github.com/boto/boto/issues/2836
+import ssl
+
+_old_match_hostname = ssl.match_hostname
+
+def _new_match_hostname(cert, hostname):
+   if hostname.endswith('.s3.amazonaws.com'):
+      pos = hostname.find('.s3.amazonaws.com')
+      hostname = hostname[:pos].replace('.', '') + hostname[pos:]
+   return _old_match_hostname(cert, hostname)
+
+ssl.match_hostname = _new_match_hostname
+
+
 LOWER_POOL_LIMIT = 10
 UPPER_POOL_LIMIT = 100
 
