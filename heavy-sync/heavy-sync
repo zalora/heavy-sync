@@ -33,6 +33,10 @@ def _new_match_hostname(cert, hostname):
 ssl.match_hostname = _new_match_hostname
 
 
+def to_stderr(message):
+    sys.stderr.write('%s\n' % message)
+
+
 def get_connection(scheme):
     return {
         'gs': boto.connect_gs,
@@ -60,16 +64,20 @@ def transfer(source_bucket, destination_bucket, path):
             f = tempfile.SpooledTemporaryFile(max_size=10*2**20)
             source_key = source_bucket.get_key(path)
             if source_key is None:
-                sys.stderr.write('Ignoring nonexistent path: %s/%s' %
-                                 (source_bucket, path))
+                to_stderr('Ignoring nonexistent path: %s/%s' % (
+                    source_bucket, path))
                 return path
             source_key.get_contents_to_file(f)
             destination_bucket.new_key(path).set_contents_from_file(f, rewind=True)
             return path
         except socket.error as e:
-            sys.stderr.write(str(e))
-            sys.stderr.write('Retrying path: %s/%s' %
-                             (source_bucket, path))
+            to_stderr(str(e))
+            to_stderr('Retrying path: %s/%s' % (
+                source_bucket, path))
+        except:
+            to_stderr('Exception caught during transfer: %s/%s -> %s/%s' % (
+                source_bucket, path, destination_bucket, path))
+            raise
 
 
 # Remove an object from a bucket, ignoring "not found" errors
@@ -79,9 +87,9 @@ def remove(bucket, path):
     except (GSResponseError, S3ResponseError) as e:
         if e.status != 404:
             raise
-        sys.stderr.write(str(e))
-        sys.stderr.write('Ignoring path: %s%s' %
-                         (destination, path))
+        to_stderr(str(e))
+        to_stderr('Ignoring path: %s%s' % (
+            destination, path))
 
 
 def finished(connection):
@@ -200,8 +208,8 @@ def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, proces
                 process(s_bucket, d_bucket, connection, process_pool_args)
 
         except sqlite3.OperationalError as e:
-            sys.stderr.write(str(e))
-            sys.stderr.write('Error encountered, please clean up %s manually.' % db)
+            to_stderr(str(e))
+            to_stderr('Error encountered, please clean up %s manually.' % db)
             raise
 
     else:
