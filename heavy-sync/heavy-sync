@@ -56,6 +56,27 @@ def lookup(scheme, bucket_name):
             raise
 
 
+def delete_old_versions(bucket, folder, old_threshold):
+
+    if old_threshold == 0:
+        return
+    assert old_threshold > 0
+
+    print 'Purging old deleted objects...'
+
+    limit = datetime.now() - timedelta(days=old_threshold)
+
+    for k in bucket.list_versions(prefix=folder):
+        if not k.DeletedTime:
+            continue
+        # This ignores timezones, but that doesn't matter now
+        deleted_time = datetime.strptime(k.DeletedTime[0:-5],
+                                         '%Y-%m-%dT%H:%M:%S')
+        if deleted_time < limit:
+            print 'Purging %s, deleted at %s' % (k.name, deleted_time)
+            k.delete()
+
+
 # Download an object from source bucket, then upload it to destination bucket
 def transfer(source_bucket, destination_bucket, path):
     while True:
@@ -174,9 +195,8 @@ def break_uri(uri):
     return (scheme, bucket_name, folder)
 
 
-DEFAULT_DB = 'state.db'
-
-def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, process_pool_args={}):
+def heavy_sync(source, destination, db, old_threshold, create_bucket_args,
+               process_pool_args):
 
     s_scheme, s_bucket_name, folder = break_uri(source)
     d_scheme, d_bucket_name, _      = break_uri(destination)
@@ -215,6 +235,8 @@ def heavy_sync(source, destination, db=DEFAULT_DB, create_bucket_args={}, proces
     else:
         new_run(s_bucket, d_bucket, folder, db, process_pool_args)
 
+    delete_old_versions(d_bucket, folder, old_threshold)
+
 
 def maybe_copy_key(s_dict, d_dict, key):
     value = s_dict.get(key, None)
@@ -227,7 +249,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('source')
     parser.add_argument('destination')
-    parser.add_argument('--db', default=DEFAULT_DB)
+    parser.add_argument('--db', default='state.db')
+    parser.add_argument('--old-threshold', type=int, default=0)
 
     parser.add_argument('--location', default=None)
     # GS only
@@ -244,7 +267,8 @@ def main():
     process_pool_args = {}
     maybe_copy_key(args, process_pool_args, 'processes')
 
-    heavy_sync(args['source'], args['destination'], args['db'], create_bucket_args, process_pool_args)
+    heavy_sync(args['source'], args['destination'], args['db'],
+               args['old_threshold'], create_bucket_args, process_pool_args)
 
 
 if __name__ == '__main__':
