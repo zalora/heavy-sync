@@ -1,14 +1,22 @@
 #!/usr/bin/env python
+# coding=utf-8
 # This module deliberately does not reuse code from heavy-sync.
 
 import argparse
 import boto
+import codecs
+import locale
 import hashlib
 import random
+import sys
 import tempfile
 
 # Seemingly unused but needed for GCS authentication
 import gcs_oauth2_boto_plugin
+
+# Wrap sys.stdout to allow writing Unicode to a pipe
+# http://stackoverflow.com/a/4546129/168034
+sys.stdout = codecs.getwriter(locale.getpreferredencoding())(sys.stdout)
 
 
 # Work around https://github.com/boto/boto/issues/2836
